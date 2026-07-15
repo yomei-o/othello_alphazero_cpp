@@ -11,6 +11,11 @@ build/
 !best6.bin
 !best8.bin
 
+# python
+__pycache__/
+*.pyc
+*.pkl
+
 # editor / tool
 .vs/
 .claude/

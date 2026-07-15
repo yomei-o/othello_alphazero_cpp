@@ -10,6 +10,9 @@ gets strong, by building every piece yourself*.
 Board size is configurable: **6x6 (default — self-play is tractable on CPU and you can
 watch it get stronger)** and **8x8 (real Othello)**.
 
+> **A Python version is also available** → [`python/`](python/) (the same AlphaZero ported
+> to NumPy only; readable side-by-side with the C++, though the C++ trains much faster).
+
 ## The three loops of AlphaZero (the whole picture)
 
 ```
