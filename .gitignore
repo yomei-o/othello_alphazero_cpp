@@ -1,0 +1,15 @@
+# build artifacts
+build/
+*.obj
+*.exe
+*.lib
+*.exp
+*.pdb
+
+# trained weights / checkpoints
+*.bin
+
+# editor / tool
+.vs/
+.claude/
+*.user

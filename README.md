@@ -1,0 +1,124 @@
+# othello-alphazero-cpp — 依存ゼロC++で作るAlphaZero（オセロ）
+
+*日本語 | [English](README.en.md)*
+
+**外部ライブラリを一切使わず（C++標準ライブラリのみ・CPUのみ）**、自作の自動微分エンジンから
+**AlphaZero** を組み上げてオセロ（リバーシ）を自己対戦で強くする実装。LibTorchもBLASも使わない。
+「AlphaZeroがなぜ強くなるのかを、自分の手で1行ずつ理解する」ための教材。
+
+盤面サイズは可変：**6x6（既定・CPUでも学習が現実的で強くなるのが見える）** と **8x8（本番オセロ）**。
+
+## AlphaZeroの3つの輪（このコードの全体像）
+
+```
+   ┌─────────────┐   自己対戦で棋譜生成    ┌──────────────┐
+   │  自己対戦     │ ──(state, π, z)──▶ │  リプレイバッファ │
+   │ MCTS+ネット   │                     └──────────────┘
+   └─────────────┘                            │ サンプリング
+         ▲                                     ▼
+         │ 採用したら best 更新           ┌──────────────┐
+   ┌─────────────┐   新旧対戦で判定      │   ネット学習    │
+   │  アリーナ評価  │ ◀──────────────── │ 方策CE+価値MSE │
+   └─────────────┘                     └──────────────┘
+```
+
+1. **自己対戦**：現在の best ネットに導かれた **MCTS** で自分同士を対戦させ、
+   各局面の「MCTS訪問回数分布 π」と「最終結果 z」を教師データとして貯める。
+2. **学習**：ネットの方策を π に、価値を z に近づける（**方策=交差エントロピー＋価値=MSE**）。
+3. **アリーナ**：学習後の候補ネットを旧 best と対戦させ、勝率が閾値を超えたら best を更新。
+   これを繰り返すと、教師データ無しの自己対戦だけで棋力が上がっていく。
+
+## 中身
+
+| ファイル | 内容 |
+|----------|------|
+| `autograd.h/.cpp` | **自作autogradエンジン**（[mini-yolov5-cpp](https://github.com/yomei-o/mini-yolov5-cpp) の scratch 版を流用）。テンソル＋計算グラフ＋逆伝播、conv2d/batchnorm/relu、**＋今回追加**：tanh・log_softmax・reshape・FC用add_bias_2d |
+| `game.h/.cpp` | オセロのルール（合法手・パス・反転・終局・勝敗）。盤面サイズ可変。ネット入力エンコード |
+| `net.h/.cpp` | 方策/価値ネット（**conv+BN+Residual** ブロック → policyヘッド＋valueヘッド(tanh)）。損失・重み保存/読込 |
+| `mcts.h/.cpp` | **PUCT探索**（Q+U選択・ネット評価で展開・値の逆伝播）＋ルートDirichletノイズ |
+| `pipeline.h/.cpp` | 自己対戦・リプレイバッファ・学習ループ・アリーナ採用・ランダム相手評価 |
+| `play.cpp` | 学習済みネットと**人間が対戦**するCLI |
+| `main.cpp` | `selftest`（検証） / `train`（学習） / `play`（対戦） |
+
+## ビルド
+
+```powershell
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+# => build/Release/othello.exe
+```
+
+Linux/macなら `cmake -S . -B build && cmake --build build`（`-O3`、pthread）。依存はコンパイラのみ。
+
+## 実行
+
+```powershell
+# 1) 自己テスト（ゲームロジック・自作opの勾配チェック・ネット・MCTSのサニティ）
+build/Release/othello.exe selftest
+
+# 2) 学習（6x6、自己対戦で強くする）
+build/Release/othello.exe train --size 6 --iters 40 --out best6.bin
+
+# 3) 学習済みと対戦（あなたが黒 X 先手。手は "行 列" で入力、パスは "pass"）
+build/Release/othello.exe play --size 6 --weights best6.bin
+
+# 8x8 本番オセロ（学習は長時間）
+build/Release/othello.exe train --size 8 --iters 100 --ch 64 --blocks 5 --out best8.bin
+```
+
+### 主なオプション（`train`）
+
+| フラグ | 既定 | 意味 |
+|--------|------|------|
+| `--size` | 6 | 盤面サイズ（6 or 8） |
+| `--iters` | 20 | AlphaZero外側ループ回数 |
+| `--sims` | 60 | 1手あたりのMCTSシミュレーション回数（強さ↔速度） |
+| `--games` | 15 | 1イテレーションの自己対戦局数 |
+| `--train-steps` | 200 | 1イテレーションの勾配ステップ数 |
+| `--ch` / `--blocks` | 32 / 3 | ネットのチャネル数 / 残差ブロック数 |
+| `--arena-games` | 20 | 新旧対戦の局数（採用判定） |
+| `--lr` | 0.02 | 学習率（SGD+モメンタム+重み減衰） |
+
+学習ログでは各イテレーションの **loss** と、**アリーナ勝率（対 best）** と
+**best の対ランダム勝率** が出る。対ランダム勝率が上がっていけば「学習が効いている」証拠。
+
+## 仕組み（学習ポイント）
+
+### 1. MCTS（PUCT）
+各ノードは行動ごとに `N(訪問数)・W(価値和)・P(事前確率)` を持つ。1シミュレーションは
+**Q + U** が最大の手を選んで降りていき（`U = c_puct·P·√ΣN /(1+N)`）、未展開の葉に来たら
+**ネットを1回評価**して事前確率と価値を得る。価値は経路を **手番ごとに符号反転** しながら
+逆伝播する（相手にとっての良さは自分にとっての悪さ）。ルートには **Dirichletノイズ** を混ぜ、
+探索が現在の best手に偏りすぎないようにする（自己対戦時のみ）。
+
+### 2. 方策/価値ネット
+`conv+BN+ReLU` の残差ブロックを積み、2つのヘッドに分岐：
+- **policyヘッド**：各マス＋パスの A=n²+1 手に対するlogits
+- **valueヘッド**：手番側から見た期待勝敗を tanh で (-1,1) に
+
+入力は **常に手番側視点** の3面（自分の石・相手の石・全1バイアス）。だからネットは
+「自分の石 vs 相手の石」だけを学べばよく、白黒を意識しなくてよい。
+
+### 3. 損失
+`方策 = -Σ π·log_softmax(logits)`（MCTS分布 π への交差エントロピー）＋
+`価値 = (v − z)²`（自己対戦の勝敗 z へのMSE）。`log_softmax` と `tanh` は自作opとして
+追加し、数値微分で勾配を検証済み（`selftest`）。
+
+### 4. 自己対戦→学習→採用
+自己対戦の序盤 `--temp-moves` 手は π からサンプリングして多様性を確保、以降は貪欲。
+学習後は **アリーナ** で旧 best と戦い、勝率が閾値（既定55%）以上なら採用。ダメなら破棄して
+best に巻き戻す＝**確実に強くなったときだけ**世代交代する。
+
+## シリーズについて
+
+C++/CPUだけでAIを一から作って理解するシリーズの一つ。**autogradは
+[mini-yolov5-cpp](https://github.com/yomei-o/mini-yolov5-cpp) の自作エンジンを流用**しており、
+「同じ手作りの自動微分が、物体検出にもAlphaZeroにも使える」ことを示す。関連：
+[nanoGPT-cpp](https://github.com/yomei-o/nanoGPT-cpp) / [nanochat-cpp](https://github.com/yomei-o/nanochat-cpp) /
+[lecun1989-cpp](https://github.com/yomei-o/lecun1989-cpp)。
+
+## メモ
+
+- **6x6を推奨**（学習が速く、強くなるのが体感できる）。8x8はCPUのみだと強くなるまで長時間かかる。
+- 速度の肝はMCTSのネット評価回数。`--sims` を下げれば速く・弱く、上げれば遅く・強く。
+- 決定論的：`--seed` 固定で再現可能（自作xorshift RNG）。
