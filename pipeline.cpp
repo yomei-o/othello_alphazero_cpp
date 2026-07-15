@@ -3,6 +3,7 @@
 #include <cmath>
 #include <algorithm>
 #include <chrono>
+#include <thread>
 
 using namespace ag;
 
@@ -53,6 +54,29 @@ void self_play_game(Net& net, MCTS& mcts, const Config& cfg, std::vector<Sample>
     }
 }
 
+// Run this iteration's self-play games across worker threads. The net is shared
+// read-only (eval mode: forward only, no BN-stat writes, no backward), so games
+// run concurrently. Each game reseeds the (thread-local) RNG with a deterministic
+// per-game value, so results are reproducible regardless of thread scheduling.
+static void parallel_self_play(Net& net, const Config& cfg, int iter,
+                               std::vector<Sample>& out) {
+    unsigned hw = std::thread::hardware_concurrency();
+    int T = std::max(1, std::min((int)(hw ? hw : 1), cfg.games_per_iter));
+    std::vector<std::vector<Sample>> locals(T);
+    std::vector<std::thread> ths;
+    for (int t = 0; t < T; ++t)
+        ths.emplace_back([&, t] {
+            MCTS sp; sp.sims = cfg.sims;
+            for (int gi = t; gi < cfg.games_per_iter; gi += T) {
+                seed((uint64_t)cfg.seed * 1000003ull + (uint64_t)iter * 10007ull + gi + 1);
+                self_play_game(net, sp, cfg, locals[t]);
+            }
+        });
+    for (auto& th : ths) th.join();
+    for (auto& l : locals)
+        for (auto& s : l) out.push_back(std::move(s));
+}
+
 // Play one greedy game between two nets; `a_is_black` sets colors. Returns the
 // disc difference from netA's perspective (>0 => A won).
 static int play_match(Net& A, Net& B, const Config& cfg, bool a_is_black, int sims) {
@@ -68,6 +92,7 @@ static int play_match(Net& A, Net& B, const Config& cfg, bool a_is_black, int si
 }
 
 float arena(Net& cand, Net& opp, const Config& cfg, int games) {
+    cand.training = false; opp.training = false;   // eval mode (eval_state won't set it)
     float wins = 0; int played = 0;
     for (int i = 0; i < games; ++i) {
         int ad = play_match(cand, opp, cfg, /*a_is_black=*/(i % 2 == 0), cfg.sims);
@@ -78,24 +103,33 @@ float arena(Net& cand, Net& opp, const Config& cfg, int games) {
 }
 
 float eval_vs_random(Net& net, const Config& cfg, int games) {
-    MCTS m; m.sims = cfg.sims;
-    float wins = 0;
-    for (int i = 0; i < games; ++i) {
-        bool net_black = (i % 2 == 0);
-        Othello g(cfg.size);
-        while (!g.is_terminal()) {
-            if ((g.player == BLACK) == net_black) {
-                auto v = m.run(g, net, false);
-                g.apply(argmax_i(v));
-            } else {
-                auto la = g.legal_actions();
-                g.apply(la[(int)(randf() * la.size()) % la.size()]);
+    net.training = false;                          // eval mode
+    unsigned hw = std::thread::hardware_concurrency();
+    int T = std::max(1, std::min((int)(hw ? hw : 1), games));
+    std::vector<float> wins(T, 0.f);
+    std::vector<std::thread> ths;
+    for (int t = 0; t < T; ++t)
+        ths.emplace_back([&, t] {
+            MCTS m; m.sims = cfg.sims;
+            for (int i = t; i < games; i += T) {
+                seed((uint64_t)cfg.seed * 7919ull + i + 1);   // reproducible per game
+                bool net_black = (i % 2 == 0);
+                Othello g(cfg.size);
+                while (!g.is_terminal()) {
+                    if ((g.player == BLACK) == net_black) {
+                        g.apply(argmax_i(m.run(g, net, false)));
+                    } else {
+                        auto la = g.legal_actions();
+                        g.apply(la[(int)(randf() * la.size()) % la.size()]);
+                    }
+                }
+                int d = g.disc_diff(net_black ? BLACK : WHITE);
+                if (d > 0) wins[t] += 1; else if (d == 0) wins[t] += 0.5f;
             }
-        }
-        int d = g.disc_diff(net_black ? BLACK : WHITE);
-        if (d > 0) wins += 1; else if (d == 0) wins += 0.5f;
-    }
-    return wins / games;
+        });
+    for (auto& th : ths) th.join();
+    float total = 0; for (float w : wins) total += w;
+    return total / games;
 }
 
 int run_train(const Config& cfg) {
@@ -118,7 +152,6 @@ int run_train(const Config& cfg) {
                 cfg.channels, cfg.blocks, cfg.sims, cfg.iters, cfg.games_per_iter,
                 cfg.train_steps, cfg.batch);
 
-    MCTS sp; sp.sims = cfg.sims;
     float best_wr = eval_vs_random(net, cfg, 30);
     best.save(cfg.out);
     std::printf("   [init] win vs random = %.0f%%\n", 100 * best_wr);
@@ -129,7 +162,7 @@ int run_train(const Config& cfg) {
         //     not a gated "best" -- that gate is AlphaGo Zero's; it can deadlock) ---
         net.training = false;
         std::vector<Sample> fresh;
-        for (int gi = 0; gi < cfg.games_per_iter; ++gi) self_play_game(net, sp, cfg, fresh);
+        parallel_self_play(net, cfg, it, fresh);   // games run across all cores
         for (auto& s : fresh) buffer.push_back(std::move(s));
         while (buffer.size() > buf_cap) buffer.pop_front();
 

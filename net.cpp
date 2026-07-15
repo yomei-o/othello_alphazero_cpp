@@ -147,14 +147,15 @@ bool Net::load(const std::string& path) {
 }
 
 void Net::eval_state(const Othello& s, std::vector<float>& logits, float& value) {
-    bool prev = training; training = false;
+    // NOTE: does not touch `training` (that would be a data race under parallel
+    // self-play). Callers must put the net in eval mode first (training=false),
+    // which self-play / arena / eval_vs_random all do.
     std::vector<float> planes;
     s.encode(planes);
     auto x = Tensor::from(std::move(planes), {1, 3, n, n}, false);
     auto pr = forward(x);
     logits.assign(pr.first.data().begin(), pr.first.data().end());   // A values
     value = pr.second.data()[0];
-    training = prev;
 }
 
 }  // namespace oth

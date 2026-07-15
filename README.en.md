@@ -123,10 +123,23 @@ Related: [nanoGPT-cpp](https://github.com/yomei-o/nanoGPT-cpp) /
 [nanochat-cpp](https://github.com/yomei-o/nanochat-cpp) /
 [lecun1989-cpp](https://github.com/yomei-o/lecun1989-cpp).
 
+## Speed (multithreading)
+
+Two spots are parallelized for CPU (only dependency: `std::thread`):
+- **Self-play is parallelized over games** (each core plays a different game). The net is
+  inference-only / shared read-only, so no locks. The RNG is **thread-local** and reseeded
+  deterministically per game, so results are reproducible regardless of thread count.
+- **The training conv is already batch-parallel** (inherited from the self-made autograd).
+- The vs-random evaluation is parallelized too.
+
+Measured (8x8, ch32, sims80, 12 games/it, 4 cores): ~**241 s/it → ~146 s/it (~1.6x)**. On
+4 cores the (already batch-parallel) training stays as a serial fraction, so Amdahl caps
+the gain — **it scales further with more cores**.
+
 ## Notes
 
 - **6x6 is recommended** (trains fast, you can feel it improve). 8x8 on CPU alone takes a
-  long time to reach strength.
+  while to reach strength.
 - Cost is dominated by MCTS net evaluations. Lower `--sims` = faster/weaker, higher =
   slower/stronger.
-- Deterministic: fix `--seed` for reproducibility (self-made xorshift RNG).
+- Deterministic: fix `--seed` for reproducibility (self-made xorshift RNG, seeded per game).

@@ -9,7 +9,10 @@
 namespace ag {
 
 // ---- deterministic RNG (xorshift128+) so runs are reproducible ------------
-static uint64_t g_s0 = 0x9E3779B97F4A7C15ull, g_s1 = 0xBF58476D1CE4E5B9ull;
+// thread_local: each worker thread owns its RNG state, so parallel self-play
+// draws don't race. Reproducibility is kept by seeding per game (seed(...) with
+// a deterministic per-game value) rather than relying on thread scheduling.
+static thread_local uint64_t g_s0 = 0x9E3779B97F4A7C15ull, g_s1 = 0xBF58476D1CE4E5B9ull;
 void seed(uint64_t s) {
     g_s0 = s ? s : 1;
     g_s1 = s ^ 0xD1B54A32D192ED03ull;
