@@ -6,8 +6,10 @@ build/
 *.exp
 *.pdb
 
-# trained weights / checkpoints
+# trained weights / checkpoints (ignore by default, but keep released weights)
 *.bin
+!best6.bin
+!best8.bin
 
 # editor / tool
 .vs/

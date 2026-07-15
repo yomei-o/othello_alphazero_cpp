@@ -60,6 +60,7 @@ build/Release/othello.exe selftest
 build/Release/othello.exe train --size 6 --iters 40 --out best6.bin
 
 # 3) 学習済みと対戦（あなたが黒 X 先手。手は "行 列" で入力、パスは "pass"）
+#    リポジトリ同梱の best6.bin ですぐ対戦できる（6x6・軽い学習済み）
 build/Release/othello.exe play --size 6 --weights best6.bin
 
 # 8x8 本番オセロ（学習は長時間）

@@ -65,6 +65,7 @@ build/Release/othello.exe selftest
 build/Release/othello.exe train --size 6 --iters 40 --out best6.bin
 
 # 3) play the trained net (you are black X; enter moves as "row col", or "pass")
+#    the repo ships best6.bin so you can play right away (6x6, lightly trained)
 build/Release/othello.exe play --size 6 --weights best6.bin
 
 # real 8x8 Othello (long training on CPU)
