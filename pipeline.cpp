@@ -137,8 +137,27 @@ int run_train(const Config& cfg) {
     Net net(cfg.size, cfg.channels, cfg.blocks, cfg.vhid);
     Net best(cfg.size, cfg.channels, cfg.blocks, cfg.vhid);  // best-by-winrate checkpoint
     Net init(cfg.size, cfg.channels, cfg.blocks, cfg.vhid);  // frozen starting net (baseline)
+    if (!cfg.resume.empty()) {
+        if (net.load(cfg.resume))
+            std::printf("   [resume] warm-started from %s\n", cfg.resume.c_str());
+        else
+            std::printf("   [resume] FAILED to load %s (starting from scratch)\n", cfg.resume.c_str());
+    }
     best.copy_from(net);
     init.copy_from(net);
+    // Optional fixed baseline: the champion must beat THIS net (not the training
+    // net's own starting point) to be adopted, and this net is shipped as the
+    // floor -- so a from-scratch run can never regress below a known-good net.
+    bool have_baseline = false;
+    if (!cfg.baseline.empty()) {
+        if (init.load(cfg.baseline)) {
+            best.copy_from(init);     // ship the baseline until something beats it
+            have_baseline = true;
+            std::printf("   [baseline] gating vs %s (shipped as floor)\n", cfg.baseline.c_str());
+        } else {
+            std::printf("   [baseline] FAILED to load %s (ignored)\n", cfg.baseline.c_str());
+        }
+    }
 
     auto params = net.params();
     std::vector<std::vector<float>> vel(params.size());
@@ -152,10 +171,24 @@ int run_train(const Config& cfg) {
                 cfg.channels, cfg.blocks, cfg.sims, cfg.iters, cfg.games_per_iter,
                 cfg.train_steps, cfg.batch);
 
+    // When warm-starting from an already-strong net, win-vs-random saturates near
+    // 100%, so it can no longer distinguish improvements. In that case gate the
+    // "best" checkpoint on the arena win rate vs the frozen starting net instead
+    // (>50% == genuinely stronger than where we resumed). Fresh runs keep the
+    // original vs-random gate. Either way we always also dump a ".latest" net.
+    // Gate on the arena vs the frozen `init` net (warm-start point or baseline)
+    // whenever one of those is in play; otherwise gate on win-vs-random.
+    bool gate_vs_init = !cfg.resume.empty() || have_baseline;
     float best_wr = eval_vs_random(net, cfg, 30);
+    // With a baseline we require a real margin (arena_thresh) to adopt; a plain
+    // warm-start only needs to be >= its own start (0.5).
+    float best_score = have_baseline ? cfg.arena_thresh
+                     : (!cfg.resume.empty() ? 0.5f : best_wr);
     best.save(cfg.out);
-    std::printf("   [init] win vs random = %.0f%%\n", 100 * best_wr);
+    std::printf("   [init] win vs random = %.0f%%%s\n", 100 * best_wr,
+                gate_vs_init ? "  (gating on arena vs frozen net)" : "");
 
+    auto train_start = std::chrono::steady_clock::now();
     for (int it = 1; it <= cfg.iters; ++it) {
         auto t0 = std::chrono::steady_clock::now();
         // --- self-play with the LATEST net (AlphaZero uses the newest weights,
@@ -201,13 +234,26 @@ int run_train(const Config& cfg) {
         float vr = eval_vs_random(net, cfg, 30);
         float wi = arena(net, init, cfg, cfg.arena_games);
         const char* tag = "";
-        if (vr >= best_wr) { best_wr = vr; best.copy_from(net); best.save(cfg.out); tag = " *saved"; }
+        float score = gate_vs_init ? wi : vr;
+        if (score >= best_score) { best_score = score; best.copy_from(net); best.save(cfg.out); tag = " *saved"; }
+        best_wr = std::max(best_wr, vr);
+        net.save(cfg.out + ".latest");   // always keep the most-trained weights too
 
         double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("iter %2d | loss %.3f | vs random %.0f%% (best %.0f%%) | vs init-net %.0f%% | buf %zu | %.1fs%s\n",
                     it, nb ? loss_acc / nb : 0.0, 100 * vr, 100 * best_wr, 100 * wi,
                     buffer.size(), secs, tag);
         std::fflush(stdout);
+
+        if (cfg.minutes > 0) {
+            double elapsed_min = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - train_start).count() / 60.0;
+            if (elapsed_min >= cfg.minutes) {
+                std::printf("   [time] %.1f min reached (budget %d) -- stopping.\n",
+                            elapsed_min, cfg.minutes);
+                break;
+            }
+        }
     }
     std::printf("best (vs-random %.0f%%) saved -> %s\n", 100 * best_wr, cfg.out.c_str());
     return 0;

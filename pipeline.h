@@ -25,6 +25,11 @@ struct Config {
     float lr = 0.01f, momentum = 0.9f, weight_decay = 1e-4f;
     unsigned seed = 1;
     std::string out = "best.bin";
+    std::string resume = "";   // if set, warm-start net/best/init from this weights file
+    std::string baseline = ""; // if set, a fixed net used as the arena gate: the
+                               // champion is only adopted when it beats this net by
+                               // arena_thresh, and this net is shipped as the floor.
+    int minutes = 0;           // if >0, stop after roughly this many wall-clock minutes
 };
 
 // One training sample: encoded state, MCTS policy target, and (filled in after

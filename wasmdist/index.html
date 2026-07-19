@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlphaZero × オセロ — WASM demo</title>
+<style>
+  :root { color-scheme: light dark; --line:#0a5c2e; --felt1:#1a8f4e; --felt2:#178246; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 620px;
+         margin: 24px auto; padding: 0 16px; line-height: 1.6; }
+  h1 { font-size: 1.35rem; margin-bottom: .15em; }
+  .sub { color: #888; margin-top: 0; font-size: .95rem; }
+
+  .scoreboard { display:flex; justify-content:center; gap: 10px; margin: 14px 0 10px; }
+  .side { display:flex; align-items:center; gap:9px; padding:7px 14px; border-radius:10px;
+          border:1px solid #8884; min-width:150px; justify-content:center; }
+  .side.turn { border-color:#3a9; box-shadow:0 0 0 2px #3a94; }
+  .disc { width:24px; height:24px; border-radius:50%; flex:0 0 auto; }
+  .disc.b { background:radial-gradient(circle at 34% 30%, #666, #000 70%); }
+  .disc.w { background:radial-gradient(circle at 34% 30%, #fff, #cfcfcf 72%); border:1px solid #bbb; }
+  .cnt { font-variant-numeric: tabular-nums; font-weight:700; font-size:1.25rem; min-width:1.4em; text-align:right; }
+  .who { color:#888; font-size:.82rem; }
+
+  #boardwrap { position:relative; width:100%; max-width:480px; margin:0 auto; }
+  #board { display:grid; width:100%; aspect-ratio:1/1; gap:2px; padding:2px;
+           background:var(--line); border-radius:8px; }
+  .cell { position:relative; background:var(--felt1); border-radius:2px; cursor:default;
+          display:flex; align-items:center; justify-content:center; }
+  .cell:nth-child(even){ background:var(--felt2); }
+  .cell.legal { cursor:pointer; }
+  .cell.legal::after { content:""; width:26%; height:26%; border-radius:50%;
+          background:#ffffff55; transition:transform .1s; }
+  .cell.legal:hover::after { transform:scale(1.25); background:#ffffff88; }
+  .stone { width:82%; height:82%; border-radius:50%;
+           box-shadow:0 2px 3px #0006; animation:pop .18s ease-out; }
+  .stone.b { background:radial-gradient(circle at 34% 30%, #6b6b6b, #050505 72%); }
+  .stone.w { background:radial-gradient(circle at 34% 30%, #ffffff, #c9c9c9 74%); }
+  .cell.last { outline:2px solid #ffd24a; outline-offset:-2px; }
+  @keyframes pop { from{ transform:scale(.4); opacity:.3; } to{ transform:scale(1); opacity:1; } }
+
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin:14px 0; justify-content:center; }
+  button, select { font-size:.95rem; padding:8px 14px; border-radius:8px; border:1px solid #888;
+           background:#f3f3f3; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  @media (prefers-color-scheme: dark){ button,select{ background:#2a2a2a; color:#eee; } }
+  label { font-size:.9rem; color:#888; }
+  #status { text-align:center; font-weight:600; min-height:1.5em; font-variant-numeric:tabular-nums; }
+  .win { color:#1a9c3a; } .lose { color:#d24; } .draw { color:#c90; }
+  .thinking { color:#888; }
+  .note { color:#888; font-size:.85rem; margin-top:18px; }
+  code { background:rgba(128,128,128,.18); padding:1px 5px; border-radius:4px; }
+  a { color:#2a8; }
+</style>
+</head>
+<body>
+  <h1>⚫⚪ AlphaZero × オセロ</h1>
+  <p class="sub">自作の自動微分エンジンで組んだ AlphaZero（方策・価値ネット＋PUCT探索）と対戦。すべてブラウザ内(WASM)で完結。</p>
+
+  <div class="scoreboard">
+    <div class="side" id="sideB"><span class="disc b"></span><span class="cnt" id="cntB">2</span><span class="who" id="whoB">あなた</span></div>
+    <div class="side" id="sideW"><span class="disc w"></span><span class="cnt" id="cntW">2</span><span class="who" id="whoW">AI</span></div>
+  </div>
+
+  <div id="boardwrap"><div id="board"></div></div>
+
+  <p id="status">読み込み中…</p>
+
+  <div class="row">
+    <label>あなたの色:
+      <select id="color">
+        <option value="1">⚫ 黒（先手）</option>
+        <option value="-1">⚪ 白（後手）</option>
+      </select>
+    </label>
+    <label>強さ:
+      <select id="level">
+        <option value="40">よわい</option>
+        <option value="120" selected>ふつう</option>
+        <option value="400">つよい</option>
+        <option value="800">さいきょう</option>
+      </select>
+    </label>
+    <button id="newgame" disabled>🔄 新しい対局</button>
+  </div>
+
+  <p class="note">
+    ⚫ 石を置ける場所には白い点が出ます。置けないときは自動でパスします。<br>
+    「強さ」は探索(MCTS)のシミュレーション回数で、多いほど強く・少し遅くなります。<br>
+    ソース: <a href="https://github.com/yomei-o/othello_alphazero_cpp">github.com/yomei-o/othello_alphazero_cpp</a>
+  </p>
+
+<script src="othello.js"></script>
+<script>
+(function(){
+  const boardEl = document.getElementById('board');
+  const statusEl = document.getElementById('status');
+  const cntB = document.getElementById('cntB'), cntW = document.getElementById('cntW');
+  const sideB = document.getElementById('sideB'), sideW = document.getElementById('sideW');
+  const whoB = document.getElementById('whoB'), whoW = document.getElementById('whoW');
+  const colorSel = document.getElementById('color'), levelSel = document.getElementById('level');
+  const btnNew = document.getElementById('newgame');
+
+  let M = null, api = {}, N = 8, PASS = 64, cells = [];
+  let humanColor = 1, busy = false, lastMove = -1;
+
+  createOthello().then(mod => {
+    M = mod;
+    api.init    = M.cwrap('oth_init', 'number', []);
+    api.reset   = M.cwrap('oth_reset', null, []);
+    api.size    = M.cwrap('oth_size', 'number', []);
+    api.pass    = M.cwrap('oth_pass', 'number', []);
+    api.player  = M.cwrap('oth_player', 'number', []);
+    api.terminal= M.cwrap('oth_terminal', 'number', []);
+    api.count   = M.cwrap('oth_count', 'number', ['number']);
+    api.board   = M.cwrap('oth_board', 'number', []);
+    api.mask    = M.cwrap('oth_mask', 'number', []);
+    api.isLegal = M.cwrap('oth_is_legal', 'number', ['number']);
+    api.apply   = M.cwrap('oth_apply', 'number', ['number']);
+    api.aiMove  = M.cwrap('oth_ai_move', 'number', ['number']);
+    N = api.init(); PASS = api.pass();
+    buildGrid();
+    btnNew.disabled = false;
+    newGame();
+  });
+
+  function buildGrid(){
+    boardEl.style.gridTemplateColumns = `repeat(${N}, 1fr)`;
+    boardEl.innerHTML = '';
+    cells = [];
+    for (let i = 0; i < N*N; i++){
+      const d = document.createElement('div');
+      d.className = 'cell';
+      d.addEventListener('click', () => onCellClick(i));
+      boardEl.appendChild(d);
+      cells.push(d);
+    }
+  }
+
+  function boardArray(){
+    const p = api.board() >> 2;
+    return M.HEAP32.subarray(p, p + N*N);
+  }
+  function maskArray(){
+    const p = api.mask() >> 2;
+    return M.HEAP32.subarray(p, p + N*N + 1);
+  }
+
+  function render(){
+    const b = boardArray();
+    const mask = maskArray();
+    const humanTurn = !busy && api.terminal()===0 && api.player()===humanColor;
+    for (let i = 0; i < N*N; i++){
+      const c = cells[i];
+      c.className = 'cell';
+      c.innerHTML = '';
+      if (b[i] !== 0){
+        const s = document.createElement('div');
+        s.className = 'stone ' + (b[i] === 1 ? 'b' : 'w');
+        c.appendChild(s);
+      } else if (humanTurn && mask[i]===1){
+        c.classList.add('legal');
+      }
+      if (i === lastMove) c.classList.add('last');
+    }
+    cntB.textContent = api.count(1);
+    cntW.textContent = api.count(-1);
+    const turn = api.player();
+    sideB.classList.toggle('turn', api.terminal()===0 && turn===1);
+    sideW.classList.toggle('turn', api.terminal()===0 && turn===-1);
+  }
+
+  function setRoles(){
+    humanColor = parseInt(colorSel.value, 10);
+    if (humanColor === 1){ whoB.textContent='あなた'; whoW.textContent='AI'; }
+    else { whoB.textContent='AI'; whoW.textContent='あなた'; }
+  }
+
+  function newGame(){
+    setRoles();
+    api.reset();
+    lastMove = -1; busy = false;
+    render();
+    statusEl.textContent = 'ゲーム開始！';
+    statusEl.className = '';
+    // If AI moves first (human is white), let it play.
+    maybeAdvance();
+  }
+
+  function onCellClick(i){
+    if (busy) return;
+    if (api.terminal()!==0) return;
+    if (api.player()!==humanColor) return;
+    if (api.isLegal(i)!==1) return;
+    api.apply(i);
+    lastMove = i;
+    render();
+    maybeAdvance();
+  }
+
+  // After a move, handle: terminal, human-must-pass, or hand over to the AI.
+  function maybeAdvance(){
+    if (api.terminal()!==0){ showResult(); return; }
+    if (api.player()===humanColor){
+      // Human to move. If the only legal action is pass, auto-pass.
+      if (api.isLegal(PASS)===1){
+        statusEl.textContent = 'あなたは置ける場所がないためパスします。';
+        busy = true;
+        setTimeout(()=>{ api.apply(PASS); busy=false; render(); maybeAdvance(); }, 700);
+      } else {
+        statusEl.textContent = 'あなたの番です。';
+        render();
+      }
+      return;
+    }
+    // AI to move.
+    aiMove();
+  }
+
+  function aiMove(){
+    busy = true;
+    render();
+    statusEl.innerHTML = '<span class="thinking">🤖 AI 思考中…</span>';
+    const sims = parseInt(levelSel.value, 10);
+    // Yield so the "thinking" text paints before the (blocking) MCTS runs.
+    setTimeout(()=>{
+      const a = api.aiMove(sims);
+      lastMove = (a === PASS ? -1 : a);
+      busy = false;
+      render();
+      if (a === PASS) statusEl.textContent = 'AI は置ける場所がないためパスしました。';
+      maybeAdvance();
+    }, 30);
+  }
+
+  function showResult(){
+    render();
+    const nb = api.count(1), nw = api.count(-1);
+    const humanDiscs = humanColor===1 ? nb : nw;
+    const aiDiscs    = humanColor===1 ? nw : nb;
+    let msg, cls;
+    if (humanDiscs > aiDiscs){ msg = `🎉 あなたの勝ち！ ${humanDiscs} 対 ${aiDiscs}`; cls='win'; }
+    else if (humanDiscs < aiDiscs){ msg = `😢 AI の勝ち… ${aiDiscs} 対 ${humanDiscs}`; cls='lose'; }
+    else { msg = `🤝 引き分け ${nb} 対 ${nw}`; cls='draw'; }
+    statusEl.textContent = msg;
+    statusEl.className = cls;
+  }
+
+  btnNew.addEventListener('click', newGame);
+  colorSel.addEventListener('change', newGame);
+})();
+</script>
+</body>
+</html>

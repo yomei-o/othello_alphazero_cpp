@@ -117,6 +117,9 @@ static Config parse(int argc, char** argv, int start) {
         else if (k == "--lr") c.lr = (float)std::atof(v.c_str());
         else if (k == "--seed") c.seed = (unsigned)std::atoi(v.c_str());
         else if (k == "--out") c.out = v;
+        else if (k == "--resume") c.resume = v;
+        else if (k == "--baseline") c.baseline = v;
+        else if (k == "--minutes") c.minutes = std::atoi(v.c_str());
     }
     return c;
 }
